@@ -11,12 +11,14 @@ class MotorControl(Node):
         self.create_subscription(Float32, '/angle', self.angle_callback, 10)
         self.create_subscription(Float32, '/deg', self.deg_callback, 10)
         self.create_subscription(Bool, '/deg_valid', self.deg_valid_callback, 10)
+        self.create_subscription(String, '/lane_text', self.lane_text_callback, 10)
+        self.create_subscription(Float32, '/m', self.m_callback, 10)
 
-        # lane change 명령 받기
-        self.create_subscription(String, '/lane_change_cmd', self.lane_change_callback, 10)
+        self.lane_text = None
 
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
+        self.m = 0.0
         self.angle_data = 0.0
         self.deg_data = 0.0
         self.deg_valid = False
@@ -26,29 +28,13 @@ class MotorControl(Node):
         self.force_turn_end_time = 0.0
         self.force_turn_z = 0.0
 
-        self.linear_speed = 0.10
+        self.linear_speed = 0.08
         self.k_angle = 0.002
-        self.k_deg = 0.024
+        self.k_deg = 0.012
 
         self.z_filtered = 0.0
 
         self.timer = self.create_timer(0.01, self.control_callback)
-
-    # 차선 변경 명령
-    def lane_change_callback(self, msg):
-        key = msg.data.lower().strip()
-
-        if key == 'a':   # 왼쪽 차선 변경 → 왼쪽으로 꺾기
-            self.force_turn = True
-            self.force_turn_z = 0.9     # 왼쪽 회전
-            self.force_turn_end_time = time.time() + 1.2 # 1.2초 동안 강제조향
-            self.get_logger().info("FORCE LEFT TURN")
-
-        elif key == 'd':  # 오른쪽 차선 변경 → 오른쪽으로 꺾기
-            self.force_turn = True
-            self.force_turn_z = -0.9    # 오른쪽 회전
-            self.force_turn_end_time = time.time() + 1.2 # 1.2초 동안 강제조향
-            self.get_logger().info("FORCE RIGHT TURN")
 
     def angle_callback(self, msg):
         self.angle_data = msg.data
@@ -59,10 +45,47 @@ class MotorControl(Node):
     def deg_valid_callback(self, msg):
         self.deg_valid = msg.data
 
+    def lane_text_callback(self, msg):
+        self.lane_text = msg.data
+        # print(self.lane_text)
+    
+    def m_callback(self, msg):
+        self.m = msg.data
+        print(self.m)
+
+        if self.lane_text == '2st lane' and self.m <= 0.35:
+            now = time.time()
+            self.force_turn = True
+            self.force_turn_z = 0.9
+            self.force_turn_end_time = now + 0.7
+            self.get_logger().info("AUTO FORCE LEFT TURN by lane_text & lidar")
+
+        elif self.lane_text == '1st lane' and self.m <= 0.35:
+            now = time.time()
+            self.force_turn = True
+            self.force_turn_z = -0.9
+            self.force_turn_end_time = now + 0.7
+            self.get_logger().info("AUTO FORCE LEFT TURN by lane_text & lidar")
+        
+        elif self.lane_text == 'thinking' and self.m <= 0.35:
+            self.force_turn = True
+            self.force_turn_z = 0.0
+            self.force_turn_end_time = now + 0.5
+            self.get_logger().info("AUTO FORCE BREAK by lane_text & lidar")
+
+        elif self.lane_text == 'none' and self.m <= 0.35:
+            self.force_turn = True
+            self.force_turn_z = 0.0
+            self.force_turn_end_time = now + 0.5
+            self.get_logger().info("AUTO FORCE BREAK by lane_text & lidar")
+
+        else:
+            pass
+
     def control_callback(self):
         now = time.time()
 
-        # 강제 조향 모드
+        # 강제 조향 모드 (안드로이드/자동 공통 처리)
         if self.force_turn:
             if now < self.force_turn_end_time:
                 twist = Twist()

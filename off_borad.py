@@ -5,7 +5,7 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import time
-from std_msgs.msg import Float32, Bool
+from std_msgs.msg import Float32, Bool, String
 
 def is_middle_lane(hits):
 
@@ -15,6 +15,7 @@ def is_middle_lane(hits):
 
     # 첫 True 위치
     first = next(i for i, v in enumerate(hits) if v)
+
     # 마지막 True 위치
     last = len(hits) - 1 - next(i for i, v in enumerate(reversed(hits)) if v)
 
@@ -42,8 +43,8 @@ def center_margin(cv_image, output, nonzerox, nonzeroy):
 def transform(img, h, w):
 
         src = np.float32([
-            [100, 250],   # 좌상
-            [539, 250],   # 우상
+            [100, 100],   # 좌상
+            [539, 100],   # 우상
             [639, 479],   # 우하
             [  0, 479],   # 좌하
         ])
@@ -68,9 +69,15 @@ class CameraSubscriber(Node):
         self.deg_pub = self.create_publisher(Float32, '/deg', 10)
         self.angle_pub = self.create_publisher(Float32, '/angle', 10)
         self.deg_valid_pub = self.create_publisher(Bool, '/deg_valid', 10)
+        self.lane_pub = self.create_publisher(String, '/lane_text', 10)
 
         self.left_is_middle  = False
         self.right_is_middle = False
+
+        self.left_middle_until  = 0.0
+        self.right_middle_until = 0.0
+
+        self.prev_lane_text = 'none'
 
         self.cv_bridge = CvBridge()
         self.get_logger().info('Camera subscriber started.')
@@ -80,7 +87,7 @@ class CameraSubscriber(Node):
         blur = cv2.GaussianBlur(cv_image, (5, 5), 0)
         hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
         lower_black = np.array([0, 0, 0])
-        upper_black = np.array([180, 255, 80])
+        upper_black = np.array([180, 255, 90])
         black_mask = cv2.inRange(hsv, lower_black, upper_black)
 
         kernel3 = np.ones((3,3), np.uint8)
@@ -126,13 +133,13 @@ class CameraSubscriber(Node):
         # 변수 선언
         windows = 10
 
-        windows_margin = 40
+        windows_margin = 60
 
         nonzerox_filtered, nonzeroy_filtered = center_margin(cv_image, output, nonzerox, nonzeroy)
 
         hegiht = int(top_view.shape[0] / windows)
 
-        min_num_pixel = 150
+        min_num_pixel = 200
 
         win_left_lane = []
         win_right_lane = []
@@ -178,8 +185,8 @@ class CameraSubscriber(Node):
             win_left_lane.append(win_left_true)
             win_right_lane.append(win_right_true)
             
-            hit_left  = len(win_left_true) >= 200
-            hit_right = len(win_right_true) >= 200
+            hit_left  = len(win_left_true) >= min_num_pixel
+            hit_right = len(win_right_true) >= min_num_pixel
 
             win_left_hit.append(hit_left)
             win_right_hit.append(hit_right)
@@ -195,13 +202,14 @@ class CameraSubscriber(Node):
                 mean_leftx  = int(np.mean(nonzerox_filtered[win_left_true]))
                 mean_lefty  = int(np.mean(nonzeroy_filtered[win_left_true]))
                 win_left_dot.append((int(mean_leftx), int(mean_lefty)))
-                # cv2.circle(output, (mean_leftx, mean_lefty), 5, (154, 250, 0), -1) # 오른쪽 점 
+                # cv2.circle(output, (mean_leftx, mean_lefty), 5, (154, 250, 0), -1) # 오른쪽 점
+                
             # 윈도우 평균값 도트 표시
             if len(win_right_true) > 0:
                 mean_rightx = int(np.mean(nonzerox_filtered[win_right_true]))
                 mean_righty = int(np.mean(nonzeroy_filtered[win_right_true]))
                 win_right_dot.append((int(mean_rightx), int(mean_righty)))
-                # cv2.circle(output, (mean_rightx, mean_righty), 5, (154, 250, 0), -1) # 오른쪽 점 
+                # cv2.circle(output, (mean_rightx, mean_righty), 5, (154, 250, 0), -1) # 오른쪽 점
 
         # 차선 시각화
         win_left_lane = np.concatenate(win_left_lane)
@@ -216,28 +224,46 @@ class CameraSubscriber(Node):
         left_gap  = is_middle_lane(win_left_hit)
         right_gap = is_middle_lane(win_right_hit)
 
-        # 왼쪽 라인 처리
+        now = time.time()
+
         if left_gap:
-            # 한 번이라도 끊겼으면 중앙선
-            self.left_is_middle = True
-        else:
-            # 6 개 이상 연속적이면 외곽선
-            if sum(win_left_hit) >= 6:
-                self.left_is_middle = False
-
-        # 오른쪽 라인 처리
+            self.left_middle_until = now + 3.0
         if right_gap:
-            # 한 번이라도 끊겼으면 중앙선
-            self.right_is_middle = True
-        else:
-            # 6 개 이상 연속적이면 외곽선
-            if sum(win_right_hit) >= 6:
-                self.right_is_middle = False
+            self.right_middle_until = now + 3.0
 
-        # 판단 중..
-        if left_gap and right_gap:
-            self.left_is_middle = False
-            self.right_is_middle = False
+        # 현재 시간 기준으로 상태 업데이트
+        self.left_is_middle  = (now < self.left_middle_until)
+        self.right_is_middle = (now < self.right_middle_until)
+
+        lane_text = 'none'
+
+        if self.left_is_middle and not self.right_is_middle:
+            # print('2st lane')   # 왼쪽만 중앙선
+            lane_text = '2st lane'
+
+        elif self.right_is_middle and not self.left_is_middle:
+            # print('1st lane')    # 오른쪽만 중앙선
+            lane_text = '1st lane'
+
+        elif self.left_is_middle and self.right_is_middle:
+            # print('thinking...')
+            lane_text = 'thinking'   # 둘 다 중앙선으로 보이는 애매 상태
+
+        else:
+            # print('lane not found')
+            lane_text = 'none'       # 차선 못 찾음
+
+        # 🔹 thinking일 때는 이전 프레임 라벨을 그대로 사용
+        if lane_text == 'thinking':
+            lane_to_publish = self.prev_lane_text
+        else:
+            lane_to_publish = lane_text
+            # thinking이 아닐 때만 prev 갱신
+            self.prev_lane_text = lane_text
+
+        msg = String()
+        msg.data = lane_to_publish
+        self.lane_pub.publish(msg)
             
         # 중앙선으로 판단된 라인 색칠
         if self.left_is_middle:
@@ -265,14 +291,14 @@ class CameraSubscriber(Node):
             steering_y = int(top_view.shape[0] * 0.8)
             steering_x = int((left_x_lane + right_x_lane) / 2)
             
-            cv2.circle(output, (robot_front_x, robot_front_y), 5, (0, 255, 255), -1)
-            cv2.circle(output, (steering_x, steering_y), 8, (0, 165, 255), 2)
+            cv2.circle(output, (robot_front_x, robot_front_y), 7, (0, 255, 255), -1)
+            cv2.circle(output, (steering_x, steering_y), 7, (0, 165, 255), 2)
 
             angle = steering_x - robot_front_x
             angle_msg = Float32()
             angle_msg.data = float(angle)
             self.angle_pub.publish(angle_msg)
-            print("current angle is : %d" % int(angle_msg.data))
+            # print("current angle is : %d" % int(angle_msg.data))
 
             valid_msg = Bool()
             valid_msg.data = False
@@ -283,7 +309,7 @@ class CameraSubscriber(Node):
             robot_front_y = int(top_view.shape[0] * 0.8)
             robot_front_x = int(top_view.shape[1] / 2)
 
-            for j in range(0, 10):
+            for j in range(2, 6):
                 c_win_y_low = c_y - (j + 1) * c_t_height
                 c_win_y_high = c_y - (j + 0) * c_t_height
                 c_win_min = c_x - center_margin_length
@@ -293,11 +319,13 @@ class CameraSubscriber(Node):
 
                 win_center_true = ((c_win_min <= roi_x) & (c_win_max >= roi_x) & (c_win_y_low <= roi_y) & (c_win_y_high >= roi_y)).nonzero()[0]
                 
-                if len(win_center_true) > 0:
+                if len(win_center_true) > min_num_pixel:
                     mean_centerx = float(np.mean(roi_x[win_center_true]))
                     mean_centery = float(np.mean(roi_y[win_center_true]))
                     win_center_lane.append((mean_centerx, mean_centery))
-                    cv2.circle(output, (int(mean_centerx), int(mean_centery)), 5, (0, 255, 255), -1)
+                    cx = roi_x[win_center_true]
+                    cy = roi_y[win_center_true]
+                    output[cy, cx] = [255, 191, 0]   # center line color (yellow)
             
             # 기울기
             if len(win_center_lane) >= 2:
@@ -319,8 +347,9 @@ class CameraSubscriber(Node):
                 self.deg_valid_pub.publish(valid_msg)
                         
         else:
-            print("lane not found no publish")
-
+            pass
+        
+        cv2.putText(cv_image, lane_text, (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3, cv2.LINE_AA)
         cv2.imshow('output', output)
         cv2.imshow('cv_image', cv_image)
         cv2.waitKey(1)
@@ -336,4 +365,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-        
